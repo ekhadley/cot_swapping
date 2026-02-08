@@ -43,25 +43,23 @@ def load_model(model_name: str) -> HookedTransformer:
     return model
 
 
-def format_prompt(model: HookedTransformer, problem: str) -> str:
+def tokenize_prompt(model: HookedTransformer, problem: str) -> t.Tensor:
     messages = [{"role": "user", "content": PROMPT_TEMPLATE.format(problem=problem)}]
-    return model.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    tokens = model.tokenizer.apply_chat_template(messages, return_tensors="pt", add_generation_prompt=True)
+    return tokens.to(model.cfg.device)
 
 
-def generate_samples(model: HookedTransformer, cfg: EvalConfig, prompt_str: str) -> list[str]:
-    responses = []
-    for _ in range(cfg.samples_per_problem):
-        output = model.generate(
-            prompt_str,
-            max_new_tokens=cfg.max_new_tokens,
-            temperature=cfg.temperature,
-            do_sample=True,
-            verbose=True,
-        )
-        # model.generate returns the full sequence including the prompt; strip it
-        response = output[len(prompt_str):]
-        responses.append(response)
-    return responses
+def generate_samples(model: HookedTransformer, cfg: EvalConfig, prompt_tokens: t.Tensor) -> list[str]:
+    batch = prompt_tokens.expand(cfg.samples_per_problem, -1)
+    output = model.generate(
+        batch,
+        max_new_tokens=cfg.max_new_tokens,
+        temperature=cfg.temperature,
+        do_sample=True,
+        verbose=True,
+    )
+    prompt_len = prompt_tokens.shape[1]
+    return [model.tokenizer.decode(output[i, prompt_len:], skip_special_tokens=True) for i in range(output.shape[0])]
 
 
 def evaluate_model(cfg: EvalConfig) -> list[dict]:
@@ -86,8 +84,8 @@ def evaluate_model(cfg: EvalConfig) -> list[dict]:
             continue
 
         gold = extract_gold_answer(prob["solution"])
-        prompt_str = format_prompt(model, prob["problem"])
-        responses = generate_samples(model, cfg, prompt_str)
+        prompt_tokens = tokenize_prompt(model, prob["problem"])
+        responses = generate_samples(model, cfg, prompt_tokens)
         result = score_problem(responses, gold)
         result["idx"] = prob["idx"]
         result["problem"] = prob["problem"]
