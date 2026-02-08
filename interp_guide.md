@@ -238,11 +238,23 @@ px.line(x=steps, y=losses).show()
 
 ### Logging
 
-Print statements, not the logging module:
+Debug printing, not the logging module. Use liberally for sanity checks, progress updates, and status messages. Color-code with a coherent scheme:
+
+| Color | Use |
+|-------|-----|
+| `gray` | Routine status (loading, saving, setup) |
+| `green` | Success / completion |
+| `cyan` | Key results, values, sanity check outputs |
+| `yellow` | Warnings, unexpected-but-not-fatal info |
+| `red` | Errors |
+| `purple` | Section headers, experiment labels |
 
 ```python
 print(f"{gray}Loading model...{endc}")
-print(f"{green}Done.{endc}")
+print(f"{green}Done. {cyan}{n_params/1e6:.1f}M params{endc}")
+print(f"{purple}=== Running ablation sweep ==={endc}")
+print(f"{cyan}Layer 5 head 3: logit diff = {diff:.4f}{endc}")
+print(f"{yellow}Warning: batch size reduced to {new_bs} due to OOM{endc}")
 ```
 
 ### Interactive Development

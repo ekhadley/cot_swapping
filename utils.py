@@ -1,5 +1,71 @@
+import json
+import os
+import random
+
+from datasets import concatenate_datasets, load_dataset
 from math_verify import parse, verify
 
+DIFFICULTY_ORDER = ["Level 3", "Level 4", "Level 2", "Level 5", "Level 1"]
+
+# ANSI colors
+green = '\x1b[38;2;0;255;0m'
+cyan = '\x1b[38;2;0;255;255m'
+gray = '\x1b[38;2;127;127;127m'
+bold = '\033[1m'
+endc = '\033[0m'
+
+
+# JSONL I/O
+
+def load_jsonl(filepath: str) -> list[dict]:
+    if not os.path.exists(filepath):
+        return []
+    with open(filepath) as f:
+        return [json.loads(line) for line in f]
+
+
+def load_completed(filepath: str) -> set[int]:
+    """Load indices of already-evaluated problems from JSONL."""
+    if not os.path.exists(filepath):
+        return set()
+    completed = set()
+    with open(filepath) as f:
+        for line in f:
+            completed.add(json.loads(line)["idx"])
+    return completed
+
+
+def append_result(filepath: str, result: dict) -> None:
+    with open(filepath, "a") as f:
+        f.write(json.dumps(result) + "\n")
+
+
+# Dataset loading
+
+MATH_SUBJECTS = ["algebra", "counting_and_probability", "geometry", "intermediate_algebra", "number_theory", "prealgebra", "precalculus"]
+
+
+def load_math_problems() -> list[dict]:
+    """Load MATH train split, ordered so medium-difficulty problems come first."""
+    ds = concatenate_datasets([load_dataset("EleutherAI/hendrycks_math", s, split="train") for s in MATH_SUBJECTS])
+    problems = [{"idx": i, **row} for i, row in enumerate(ds)]
+    rng = random.Random(42)
+    groups: dict[str, list[dict]] = {level: [] for level in DIFFICULTY_ORDER}
+    for p in problems:
+        groups.setdefault(p["level"], []).append(p)
+    ordered = []
+    for level in DIFFICULTY_ORDER:
+        rng.shuffle(groups[level])
+        ordered.extend(groups[level])
+    # Append any unknown levels (e.g. "Level ?") at the end
+    for level, probs in groups.items():
+        if level not in DIFFICULTY_ORDER:
+            rng.shuffle(probs)
+            ordered.extend(probs)
+    return ordered
+
+
+# Answer extraction & comparison
 
 def _extract_last_boxed(text: str) -> str | None:
     """Extract content of the last \\boxed{} in text, handling nested braces."""

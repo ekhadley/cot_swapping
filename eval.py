@@ -1,87 +1,71 @@
-import asyncio
-import json
+import argparse
 import os
-import random
+from dataclasses import dataclass
 
-from datasets import load_dataset
-from openai import AsyncOpenAI
+import torch as t
+from transformer_lens import HookedTransformer
 from tqdm import tqdm
 
-from utils import extract_gold_answer, score_problem
+from utils import (
+    load_math_problems, load_completed, load_jsonl, append_result,
+    extract_gold_answer, score_problem,
+    green, cyan, gray, bold, endc,
+)
 
-green = '\x1b[38;2;0;255;0m'
-yellow = '\x1b[38;2;255;255;0m'
-gray = '\x1b[38;2;127;127;127m'
-endc = '\033[0m'
+WEAK_MODEL = "qwen3-1.7b"
+STRONG_MODEL = "qwen3-14b"
 
-DIFFICULTY_ORDER = ["Level 3", "Level 4", "Level 2", "Level 5", "Level 1"]
+MODEL_MAP = {
+    "weak": WEAK_MODEL,
+    "strong": STRONG_MODEL,
+}
 
-
-def load_math_problems() -> list[dict]:
-    """Load MATH train split, ordered so medium-difficulty problems come first."""
-    ds = load_dataset("hendrycks/competition_math", split="train")
-    problems = [{"idx": i, **row} for i, row in enumerate(ds)]
-    rng = random.Random(42)
-    groups = {level: [] for level in DIFFICULTY_ORDER}
-    for p in problems:
-        groups[p["level"]].append(p)
-    ordered = []
-    for level in DIFFICULTY_ORDER:
-        rng.shuffle(groups[level])
-        ordered.extend(groups[level])
-    return ordered
+PROMPT_TEMPLATE = "Solve the following math problem. Show your reasoning, then give your final answer in \\boxed{{}}.\n\n{problem}"
 
 
-def load_completed(filepath: str) -> set[int]:
-    """Load indices of already-evaluated problems from JSONL."""
-    if not os.path.exists(filepath):
-        return set()
-    completed = set()
-    with open(filepath) as f:
-        for line in f:
-            completed.add(json.loads(line)["idx"])
-    return completed
+@dataclass
+class EvalConfig:
+    model_name: str
+    model_label: str
+    samples_per_problem: int = 16
+    target_plausible: int = 30
+    accuracy_low: float = 0.25
+    accuracy_high: float = 0.75
+    temperature: float = 0.7
+    max_new_tokens: int = 16384
+    data_dir: str = "data"
 
 
-def load_jsonl(filepath: str) -> list[dict]:
-    if not os.path.exists(filepath):
-        return []
-    with open(filepath) as f:
-        return [json.loads(line) for line in f]
+def load_model(model_name: str) -> HookedTransformer:
+    print(f"{gray}Loading {model_name}...{endc}")
+    model = HookedTransformer.from_pretrained(model_name, dtype=t.bfloat16, device="cuda")
+    print(f"{green}Loaded {model_name} ({sum(p.numel() for p in model.parameters()) / 1e6:.0f}M params){endc}")
+    return model
 
 
-def append_result(filepath: str, result: dict) -> None:
-    with open(filepath, "a") as f:
-        f.write(json.dumps(result) + "\n")
+def format_prompt(model: HookedTransformer, problem: str) -> str:
+    messages = [{"role": "user", "content": PROMPT_TEMPLATE.format(problem=problem)}]
+    return model.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
 
-def build_prompt(problem: str) -> list[dict]:
-    return [{"role": "user", "content": f"Solve the following math problem. Show your reasoning, then give your final answer in \\boxed{{}}.\n\n{problem}"}]
-
-
-async def generate_one(client: AsyncOpenAI, cfg, problem: str, semaphore: asyncio.Semaphore) -> str:
-    async with semaphore:
-        response = await client.chat.completions.create(
-            model=cfg.model_id,
-            messages=build_prompt(problem),
+def generate_samples(model: HookedTransformer, cfg: EvalConfig, prompt_str: str) -> list[str]:
+    responses = []
+    for _ in range(cfg.samples_per_problem):
+        output = model.generate(
+            prompt_str,
+            max_new_tokens=cfg.max_new_tokens,
             temperature=cfg.temperature,
-            max_tokens=cfg.max_tokens,
+            do_sample=True,
+            verbose=True,
         )
-        return response.choices[0].message.content
+        # model.generate returns the full sequence including the prompt; strip it
+        response = output[len(prompt_str):]
+        responses.append(response)
+    return responses
 
 
-async def generate_samples(client: AsyncOpenAI, cfg, problem: str, semaphore: asyncio.Semaphore) -> list[str]:
-    tasks = [generate_one(client, cfg, problem, semaphore) for _ in range(cfg.samples_per_problem)]
-    return await asyncio.gather(*tasks)
-
-
-async def evaluate_model(cfg) -> list[dict]:
-    client = AsyncOpenAI(
-        base_url=cfg.openrouter_base_url,
-        api_key=cfg.openrouter_api_key,
-        max_retries=5,
-    )
-    semaphore = asyncio.Semaphore(cfg.max_concurrent)
+def evaluate_model(cfg: EvalConfig) -> list[dict]:
+    model = load_model(cfg.model_name)
 
     problems = load_math_problems()
     raw_path = os.path.join(cfg.data_dir, f"raw_results_{cfg.model_label}.jsonl")
@@ -90,7 +74,9 @@ async def evaluate_model(cfg) -> list[dict]:
     completed = load_completed(raw_path)
     plausible = load_jsonl(plausible_path)
 
-    pbar = tqdm(total=cfg.target_plausible, desc=f"{cfg.model_label} plausible", unit="prob")
+    n_attempted = len(completed)
+    pbar = tqdm(total=cfg.target_plausible, desc=f"{cfg.model_label}", unit="pl", ncols=120)
+    pbar.set_postfix(tried=n_attempted, last_acc="—")
     pbar.update(len(plausible))
 
     for prob in problems:
@@ -100,7 +86,8 @@ async def evaluate_model(cfg) -> list[dict]:
             continue
 
         gold = extract_gold_answer(prob["solution"])
-        responses = await generate_samples(client, cfg, prob["problem"], semaphore)
+        prompt_str = format_prompt(model, prob["problem"])
+        responses = generate_samples(model, cfg, prompt_str)
         result = score_problem(responses, gold)
         result["idx"] = prob["idx"]
         result["problem"] = prob["problem"]
@@ -109,6 +96,8 @@ async def evaluate_model(cfg) -> list[dict]:
         result["type"] = prob["type"]
 
         append_result(raw_path, result)
+        n_attempted += 1
+        pbar.set_postfix(tried=n_attempted, last_acc=f"{result['accuracy']:.2f}")
 
         if cfg.accuracy_low <= result["accuracy"] <= cfg.accuracy_high:
             plausible.append(result)
@@ -120,3 +109,15 @@ async def evaluate_model(cfg) -> list[dict]:
 
     pbar.close()
     return plausible
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Baseline evaluation for CoT swapping")
+    parser.add_argument("--model", choices=["weak", "strong"], required=True)
+    args = parser.parse_args()
+
+    os.makedirs("data", exist_ok=True)
+    cfg = EvalConfig(model_name=MODEL_MAP[args.model], model_label=args.model)
+    print(f"{bold}{cyan}=== Evaluating {args.model} model: {cfg.model_name} ==={endc}")
+    plausible = evaluate_model(cfg)
+    print(f"{green}Found {len(plausible)} plausible problems for {args.model} model{endc}")
