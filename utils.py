@@ -3,10 +3,8 @@ import os
 import random
 from pathlib import Path
 
-from datasets import concatenate_datasets, load_dataset
+from datasets import load_dataset
 from math_verify import parse, verify
-
-DIFFICULTY_ORDER = ["Level 3", "Level 4", "Level 2", "Level 5", "Level 1"]
 
 # ANSI colors
 green = '\x1b[38;2;0;255;0m'
@@ -59,13 +57,22 @@ def append_result(filepath: str, result: dict) -> None:
 
 # Dataset loading
 
-MATH_SUBJECTS = ["algebra", "counting_and_probability", "geometry", "intermediate_algebra", "number_theory", "prealgebra", "precalculus"]
 
-
-def load_math_problems() -> list[dict]:
-    """Load MATH train split, globally shuffled with fixed seed."""
-    ds = concatenate_datasets([load_dataset("EleutherAI/hendrycks_math", s, split="train") for s in MATH_SUBJECTS])
-    problems = [{"idx": i, **row} for i, row in enumerate(ds)]
+def load_aime_problems() -> list[dict]:
+    """Load AIME 1983-2024 problems, shuffled with fixed seed."""
+    ds = load_dataset("qq8933/AIME_1983_2024", split="train")
+    problems = [
+        {
+            "idx": i,
+            "problem": row["Question"],
+            "gold_answer": str(row["Answer"]),
+            "level": "AIME",
+            "type": f"AIME_{row['Year']}",
+            "year": row["Year"],
+            "problem_number": row["Problem Number"],
+        }
+        for i, row in enumerate(ds)
+    ]
     random.Random(42).shuffle(problems)
     return problems
 
@@ -101,13 +108,6 @@ def _extract_last_boxed(text: str) -> str | None:
     while end < len(text) and text[end] not in ' \t\n.,;)$':
         end += 1
     return text[start:end]
-
-
-def extract_gold_answer(solution: str) -> str:
-    """Extract the answer from a MATH solution's \\boxed{}."""
-    answer = _extract_last_boxed(solution)
-    assert answer is not None, f"No \\boxed found in solution: {solution[:200]}"
-    return answer
 
 
 def extract_model_answer(response: str) -> str | None:

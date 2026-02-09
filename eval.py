@@ -8,9 +8,9 @@ from openai import AsyncOpenAI
 from tqdm import tqdm
 
 from utils import (
-    load_env, load_math_problems, load_completed, load_jsonl, append_result,
+    load_env, load_aime_problems, load_completed, load_jsonl, append_result,
     write_jsonl, filter_divergent,
-    build_prompt, extract_gold_answer, score_problem,
+    build_prompt, extract_model_answer, score_problem,
     green, cyan, gray, bold, endc,
 )
 
@@ -42,17 +42,32 @@ class EvalConfig:
     temperature: float = 0.7
     max_tokens: int = 16384
     max_concurrent: int = 256
-    hard_only: bool = True
     data_dir: str = "data"
+
+
+MAX_SAMPLE_RETRIES = 3
+
+
+async def sample_once(client, semaphore, cfg: EvalConfig, problem_text: str) -> str:
+    """Get one completion, retrying if response is empty or missing \\boxed{}."""
+    content = ""
+    for _ in range(MAX_SAMPLE_RETRIES):
+        async with semaphore:
+            r = await client.chat.completions.create(
+                model=cfg.model_id, messages=build_prompt(problem_text),
+                temperature=cfg.temperature, max_tokens=cfg.max_tokens,
+            )
+            content = r.choices[0].message.content or ""
+        if content and extract_model_answer(content) is not None:
+            return content
+    return content
 
 
 async def evaluate_model(cfg: EvalConfig) -> list[dict]:
     client = AsyncOpenAI(base_url=cfg.base_url, api_key=cfg.api_key, max_retries=5)
     semaphore = asyncio.Semaphore(cfg.max_concurrent)
 
-    problems = load_math_problems()
-    if cfg.hard_only:
-        problems = [p for p in problems if p["level"] == "Level 5"]
+    problems = load_aime_problems()
     raw_path = os.path.join(cfg.data_dir, f"raw_results_{cfg.model_label}.jsonl")
     plausible_path = os.path.join(cfg.data_dir, f"plausible_{cfg.model_label}.jsonl")
 
@@ -61,19 +76,9 @@ async def evaluate_model(cfg: EvalConfig) -> list[dict]:
     todo = [p for p in problems if p["idx"] not in completed]
 
     async def process_problem(prob: dict) -> dict:
-        gold = extract_gold_answer(prob["solution"])
-
-        async def one_sample() -> str:
-            async with semaphore:
-                r = await client.chat.completions.create(
-                    model=cfg.model_id, messages=build_prompt(prob["problem"]),
-                    temperature=cfg.temperature, max_tokens=cfg.max_tokens,
-                )
-                return r.choices[0].message.content
-
-        responses = await asyncio.gather(*[one_sample() for _ in range(cfg.samples_per_problem)])
-        result = score_problem(responses, gold)
-        result.update(idx=prob["idx"], problem=prob["problem"], gold_answer=gold, level=prob["level"], type=prob["type"])
+        responses = await asyncio.gather(*[sample_once(client, semaphore, cfg, prob["problem"]) for _ in range(cfg.samples_per_problem)])
+        result = score_problem(responses, prob["gold_answer"])
+        result.update(idx=prob["idx"], problem=prob["problem"], gold_answer=prob["gold_answer"], level=prob["level"], type=prob["type"])
         return result
 
     last_acc = "—"
@@ -135,15 +140,7 @@ async def evaluate_from_saved(cfg: EvalConfig, n_hardest: int | None = None) -> 
     todo = [p for p in problems if p["idx"] not in completed]
 
     async def process_problem(prob: dict) -> dict:
-        async def one_sample() -> str:
-            async with semaphore:
-                r = await client.chat.completions.create(
-                    model=cfg.model_id, messages=build_prompt(prob["problem"]),
-                    temperature=cfg.temperature, max_tokens=cfg.max_tokens,
-                )
-                return r.choices[0].message.content
-
-        responses = await asyncio.gather(*[one_sample() for _ in range(cfg.samples_per_problem)])
+        responses = await asyncio.gather(*[sample_once(client, semaphore, cfg, prob["problem"]) for _ in range(cfg.samples_per_problem)])
         result = score_problem(responses, prob["gold_answer"])
         result.update(idx=prob["idx"], problem=prob["problem"], gold_answer=prob["gold_answer"], level=prob["level"], type=prob["type"])
         return result
@@ -186,14 +183,13 @@ if __name__ == "__main__":
     parser.add_argument("--from-saved", action="store_true")
     parser.add_argument("--target", type=int, default=30, help="number of plausible problems to find")
     parser.add_argument("--concurrent", type=int, default=256, help="max concurrent API requests")
-    parser.add_argument("--no-hard-only", action="store_true", help="use all difficulty levels, not just Level 5")
     parser.add_argument("--n-hardest", type=int, default=None, help="with --from-saved, only use the N lowest-accuracy problems")
     parser.add_argument("--filter-divergent", type=str, default=None, metavar="CROSS_FILE", help="cross-eval JSONL to compute divergence against model's plausible set")
     parser.add_argument("--num", type=int, default=15, help="number of top divergent problems to save (with --filter-divergent)")
     args = parser.parse_args()
 
     os.makedirs("data", exist_ok=True)
-    cfg = EvalConfig(model_id=MODEL_MAP[args.model], model_label=args.model, target_plausible=args.target, max_concurrent=args.concurrent, hard_only=not args.no_hard_only)
+    cfg = EvalConfig(model_id=MODEL_MAP[args.model], model_label=args.model, target_plausible=args.target, max_concurrent=args.concurrent)
 
     if args.filter_divergent:
         other = OTHER_LABEL[args.model]
