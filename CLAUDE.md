@@ -33,10 +33,10 @@ MATH benchmark. For each model, we filter to problems in the "borderline" diffic
 
 ## Technical Notes
 
-- Inference via OpenRouter API (`openai`-compatible client).
+- Inference via OpenRouter using the `rollouts` library (`pip install rollouts`). Handles concurrent sampling, caching, and thought injection for reasoning models.
 - Need temperature > 0 for multiple samples per problem (currently 0.7, 16 samples).
 - MATH answers have a standardized `\boxed{}` format for answer extraction. We use `math-verify` for answer comparison.
-- Store intermediate results (generated CoTs, extracted answers) to avoid re-running expensive generations.
+- `rollouts` auto-caches responses (JSON file-based in `.rollouts/`), so re-runs are free.
 
 ## eval.py Usage
 

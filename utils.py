@@ -26,10 +26,6 @@ def load_env():
         os.environ.setdefault(key.strip(), value.strip())
 
 
-def build_prompt(problem: str) -> list[dict]:
-    return [{"role": "user", "content": f"Solve the following math problem. Show your reasoning, then give your final answer in \\boxed{{}}.\n\n{problem}"}]
-
-
 # JSONL I/O
 
 def load_jsonl(filepath: str) -> list[dict]:
@@ -163,19 +159,22 @@ def filter_divergent(plausible_path: str, cross_path: str, n: int, base_label: s
     return merged[:n]
 
 
-def score_problem(responses: list[str], gold_answer: str) -> dict:
+def score_problem(responses: list[str], gold_answer: str, timestamps: list[int] | None = None) -> dict:
     """Score all responses for a single problem. Returns accuracy stats + per-sample details."""
     per_sample = []
     num_correct = 0
-    for response in responses:
+    for i, response in enumerate(responses):
         extracted = extract_model_answer(response)
         correct = check_answer(extracted, gold_answer) if extracted else False
         num_correct += correct
-        per_sample.append({
+        sample = {
             "extracted_answer": extracted,
             "correct": correct,
             "raw_response": response,
-        })
+        }
+        if timestamps is not None:
+            sample["created"] = timestamps[i]
+        per_sample.append(sample)
     return {
         "num_correct": num_correct,
         "num_total": len(responses),
