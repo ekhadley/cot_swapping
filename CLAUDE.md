@@ -6,8 +6,8 @@ Study the effects of swapping chains of thought between a weaker and stronger re
 
 ## Models
 
-- **Weak:** Qwen3-1.7B
-- **Strong:** Qwen3-14B
+- **Weak:** Qwen3-8B (OpenRouter: `qwen/qwen3-8b`)
+- **Strong:** Qwen3-32B (OpenRouter: `qwen/qwen3-32b`)
 
 Both are reasoning models that produce `<think>...</think>` blocks before answering.
 
@@ -33,11 +33,24 @@ MATH benchmark. For each model, we filter to problems in the "borderline" diffic
 
 ## Technical Notes
 
-- Qwen3-14B needs the HPC (A100, 40GB VRAM). Qwen3-1.7B fits locally.
-- Use vLLM or transformers for generation. Need temperature > 0 for multiple samples per problem.
-- MATH answers have a standardized `\boxed{}` format for answer extraction.
+- Inference via OpenRouter API (`openai`-compatible client).
+- Need temperature > 0 for multiple samples per problem (currently 0.7, 16 samples).
+- MATH answers have a standardized `\boxed{}` format for answer extraction. We use `math-verify` for answer comparison.
 - Store intermediate results (generated CoTs, extracted answers) to avoid re-running expensive generations.
+
+## eval.py Usage
+
+- `./eval.py --model {weak,strong}` — Baseline eval: find plausible (25–75% accuracy) problems for a model. Saves to `data/raw_results_{label}.jsonl` and `data/plausible_{label}.jsonl`.
+- `./eval.py --model {weak,strong} --from-saved` — Cross-eval: evaluate a model on the *other* model's plausible problems. Saves to `data/cross_{label}_on_{other}.jsonl`.
+- `./eval.py --model {weak,strong} --filter-divergent CROSS_FILE --num N` — Find the N problems with largest accuracy divergence between a model's plausible set and a cross-eval file. Saves to `data/target_problems.jsonl` with full per-sample data from both models.
+
+## Data Files
+
+- `data/raw_results_{label}.jsonl` — All evaluated problems for a model (full results).
+- `data/plausible_{label}.jsonl` — Subset with accuracy in [0.25, 0.75].
+- `data/cross_{label}_on_{other}.jsonl` — One model evaluated on the other's plausible problems.
+- `data/target_problems.jsonl` — High-divergence problems selected for CoT swapping experiments.
 
 ## Current Phase
 
-**Phase 1: Baseline evaluation & problem filtering.** Run each model on MATH problems multiple times, compute per-problem accuracy, filter to the 25–75% band.
+**Phase 1: Baseline evaluation & problem filtering.** Run each model on MATH problems multiple times, compute per-problem accuracy, filter to the 25–75% band. Cross-evaluate models on each other's plausible sets. Select high-divergence target problems.

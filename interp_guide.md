@@ -200,6 +200,8 @@ for i in trange(100):
     ...
 ```
 
+Put custom info on the left side of the bar, color it if you like. Use ascii=" >=" for the bar style.
+
 ### GPU Memory
 
 Explicit cache clearing:
