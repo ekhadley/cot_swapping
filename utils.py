@@ -1,7 +1,6 @@
 import json
 import os
 import random
-from pathlib import Path
 
 from datasets import load_dataset
 from math_verify import parse, verify
@@ -12,18 +11,6 @@ cyan = '\x1b[38;2;0;255;255m'
 gray = '\x1b[38;2;127;127;127m'
 bold = '\033[1m'
 endc = '\033[0m'
-
-
-def load_env():
-    """Load .env file into os.environ."""
-    env_path = Path(__file__).parent / ".env"
-    assert env_path.exists(), f"Missing .env file at {env_path}"
-    for line in env_path.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        key, _, value = line.partition("=")
-        os.environ.setdefault(key.strip(), value.strip())
 
 
 # JSONL I/O
