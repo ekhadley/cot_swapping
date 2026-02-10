@@ -34,42 +34,55 @@ def load_model(model_id):
     return model, tokenizer
 
 
-def generate_samples(model, tokenizer, prompt, n_samples, max_tokens, batch_size, temperature):
+def generate_samples(model, tokenizer, prompt, n_samples, max_tokens, batch_size, temperature, verbose=False):
     """Generate n_samples completions, retrying truncated ones. Returns list of response strings."""
     messages = [{"role": "user", "content": prompt}]
     text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, enable_thinking=True)
     input_ids = tokenizer(text, return_tensors="pt").input_ids.to(model.device)
+    attention_mask = torch.ones_like(input_ids)
     input_len = input_ids.shape[1]
 
     all_responses = []
     remaining = n_samples
+    truncated_total = 0
 
     for wave in range(MAX_RETRY_WAVES + 1):
         if remaining <= 0:
             break
 
+        wave_truncated = 0
         for batch_start in range(0, remaining, batch_size):
             bs = min(batch_size, remaining - batch_start)
             with torch.no_grad():
                 outputs = model.generate(
                     input_ids.expand(bs, -1),
+                    attention_mask=attention_mask.expand(bs, -1),
                     max_new_tokens=max_tokens,
                     do_sample=True,
                     temperature=temperature,
-                    num_return_sequences=1,  # one per input copy
+                    num_return_sequences=1,
                 )
             for seq in outputs:
                 gen_len = seq.shape[0] - input_len
                 if gen_len >= max_tokens:
-                    continue  # truncated, discard
+                    wave_truncated += 1
+                    if verbose:
+                        print(f"    {gray}[truncated] {gen_len} tokens (hit max){endc}")
+                    continue
                 response = tokenizer.decode(seq[input_len:], skip_special_tokens=True)
                 all_responses.append(response)
+                if verbose:
+                    print(f"    sample {len(all_responses)}: {gen_len} tokens, {len(response)} chars")
 
+        truncated_total += wave_truncated
         remaining = n_samples - len(all_responses)
         if remaining <= 0:
             break
         if wave < MAX_RETRY_WAVES:
             print(f"    retrying {remaining} truncated samples (wave {wave + 1})...")
+
+    if verbose and truncated_total:
+        print(f"    {truncated_total} total truncated samples discarded")
 
     return all_responses[:n_samples]
 
@@ -196,8 +209,8 @@ if __name__ == "__main__":
 
         model, tokenizer = load_model(MODEL_MAP[args.model])
         prompt = PROMPT_TEMPLATE.format(problem=prob["problem"])
-        print(f"Sampling {args.n_samples}x with {MODEL_MAP[args.model]}...")
-        responses = generate_samples(model, tokenizer, prompt, args.n_samples, args.max_tokens, batch_size, args.temperature)
+        print(f"Sampling {args.n_samples}x with {MODEL_MAP[args.model]} (max_tokens={args.max_tokens})...")
+        responses = generate_samples(model, tokenizer, prompt, args.n_samples, args.max_tokens, batch_size, args.temperature, verbose=True)
 
         scored = score_problem(responses, prob["gold_answer"])
         print(f"\n{bold}Results: {scored['num_correct']}/{scored['num_total']} correct (acc={scored['accuracy']:.3f}){endc}\n")
