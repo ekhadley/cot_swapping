@@ -7,7 +7,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from utils import (
     load_aime_problems, load_completed, load_jsonl, append_result,
-    write_jsonl, filter_divergent, score_problem,
+    write_jsonl, filter_divergent, score_problem, extract_model_answer,
     green, cyan, gray, bold, endc,
 )
 
@@ -178,13 +178,35 @@ if __name__ == "__main__":
     parser.add_argument("--max-tokens", type=int, default=16384, help="max new tokens per generation")
     parser.add_argument("--batch-size", type=int, default=None, help="sequences per generate call (default: n_samples)")
     parser.add_argument("--temperature", type=float, default=0.7, help="sampling temperature")
+    parser.add_argument("--test-idx", type=int, default=None, help="test a single problem by dataset idx, print results, save nothing")
     parser.add_argument("--filter-divergent", type=str, default=None, metavar="CROSS_FILE")
     parser.add_argument("--num", type=int, default=15, help="number of top divergent problems (with --filter-divergent)")
     args = parser.parse_args()
 
     os.makedirs("data", exist_ok=True)
 
-    if args.filter_divergent:
+    if args.test_idx is not None:
+        problems = load_aime_problems()
+        prob = next((p for p in problems if p["idx"] == args.test_idx), None)
+        assert prob, f"No problem with idx={args.test_idx}"
+        batch_size = args.batch_size or args.n_samples
+
+        print(f"{bold}{cyan}=== Test idx={prob['idx']} | {prob['type']} #{prob['problem_number']} | gold={prob['gold_answer']} ==={endc}")
+        print(f"{prob['problem']}\n")
+
+        model, tokenizer = load_model(MODEL_MAP[args.model])
+        prompt = PROMPT_TEMPLATE.format(problem=prob["problem"])
+        print(f"Sampling {args.n_samples}x with {MODEL_MAP[args.model]}...")
+        responses = generate_samples(model, tokenizer, prompt, args.n_samples, args.max_tokens, batch_size, args.temperature)
+
+        scored = score_problem(responses, prob["gold_answer"])
+        print(f"\n{bold}Results: {scored['num_correct']}/{scored['num_total']} correct (acc={scored['accuracy']:.3f}){endc}\n")
+        for i, s in enumerate(scored["per_sample"]):
+            mark = f"{green}Y{endc}" if s["correct"] else f"{gray}N{endc}"
+            ans = s["extracted_answer"] or "???"
+            print(f"  [{mark}] sample {i}: answer={ans}")
+
+    elif args.filter_divergent:
         other = OTHER_LABEL[args.model]
         plausible_path = f"data/plausible_{args.model}.jsonl"
         results = filter_divergent(plausible_path, args.filter_divergent, args.num, args.model, other)
